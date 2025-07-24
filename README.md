@@ -74,7 +74,7 @@ Configure Claude for Desktop by editing `claude_desktop_config.json`
       "env": {
         "LANGFUSE_PUBLIC_KEY": "your-public-key",
         "LANGFUSE_SECRET_KEY": "your-secret-key",
-        "LANGFUSE_BASEURL": "https://cloud.langfuse.com"
+        "LANGFUSE_BASEURL": "https://us.cloud.langfuse.com"
       }
     }
   }
@@ -91,7 +91,7 @@ Add new server to Cursor:
 - Type: `command`
 - Command:
   ```bash
-  LANGFUSE_PUBLIC_KEY="your-public-key" LANGFUSE_SECRET_KEY="your-secret-key" LANGFUSE_BASEURL="https://cloud.langfuse.com" node absolute-path/build/index.js
+  LANGFUSE_PUBLIC_KEY="your-public-key" LANGFUSE_SECRET_KEY="your-secret-key" LANGFUSE_BASEURL="https://us.cloud.langfuse.com" node absolute-path/build/index.js
   ```
 
 ## Limitations
