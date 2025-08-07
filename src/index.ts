@@ -1,228 +1,212 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
+#!/usr/bin/env node
+// Main entry point for Langfuse MCP Server with full CRUD operations
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { 
   ListPromptsRequestSchema,
-  ListPromptsRequest,
-  ListPromptsResult,
   GetPromptRequestSchema,
+  ListPromptsRequest,
   GetPromptRequest,
+  ListPromptsResult,
   GetPromptResult,
-  CallToolResult,
-} from "@modelcontextprotocol/sdk/types.js";
-import { Langfuse, ChatPromptClient } from "langfuse";
-import { extractVariables } from "./utils.js";
-import { z } from "zod";
+} from '@modelcontextprotocol/sdk/types.js';
+import { LangfuseAPIClient } from './lib/langfuse-client.js';
+import { LangfuseConfig } from './types/index.js';
 
-// Requires Environment Variables
-const langfuse = new Langfuse();
+// Import tool handlers
+import { createListPromptsHandler, listPromptsSchema } from './tools/list-prompts.js';
+import { createGetPromptHandler, getPromptSchema } from './tools/get-prompt.js';
+import { createCreatePromptHandler, createPromptSchema } from './tools/create-prompt.js';
+import { createUpdatePromptLabelsHandler, updatePromptLabelsSchema } from './tools/update-prompt-labels.js';
+import { createDeletePromptHandler, deletePromptSchema } from './tools/delete-prompt.js';
+import { createBatchUpdateLabelsHandler, batchUpdateLabelsSchema } from './tools/batch-update-labels.js';
+import { createExportPromptsHandler, exportPromptsSchema } from './tools/export-prompts.js';
+import { createImportPromptsHandler, importPromptsSchema } from './tools/import-prompts.js';
 
-// Create MCP server instance with a "prompts" capability.
-const server = new McpServer(
-  {
-    name: "langfuse-prompts",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      prompts: {},
-    },
-  }
-);
+// Get configuration from environment
+function getConfig(): LangfuseConfig {
+  const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
+  const secretKey = process.env.LANGFUSE_SECRET_KEY;
+  const baseUrl = process.env.LANGFUSE_BASEURL || 'https://cloud.langfuse.com';
 
-async function listPromptsHandler(
-  request: ListPromptsRequest
-): Promise<ListPromptsResult> {
-  try {
-    const cursor = request.params?.cursor;
-    const page = cursor ? Number(cursor) : 1;
-    if (cursor !== undefined && isNaN(page)) {
-      throw new Error("Cursor must be a valid number");
-    }
-
-    const res = await langfuse.api.promptsList({
-      limit: 100,
-      page,
-      label: "production",
-    });
-
-    const resPrompts: ListPromptsResult["prompts"] = await Promise.all(
-      res.data.map(async (i) => {
-        const prompt = await langfuse.getPrompt(i.name, undefined, {
-          cacheTtlSeconds: 0,
-        });
-        const variables = extractVariables(JSON.stringify(prompt.prompt));
-        return {
-          name: i.name,
-          arguments: variables.map((v) => ({
-            name: v,
-            required: false,
-          })),
-        };
-      })
-    );
-
-    return {
-      prompts: resPrompts,
-      nextCursor:
-        res.meta.totalPages > page ? (page + 1).toString() : undefined,
-    };
-  } catch (error) {
-    console.error("Error fetching prompts:", error);
-    throw new Error("Failed to fetch prompts");
-  }
-}
-
-async function getPromptHandler(
-  request: GetPromptRequest
-): Promise<GetPromptResult> {
-  const promptName: string = request.params.name;
-  const args = request.params.arguments || {};
-
-  try {
-    // Initialize Langfuse client and fetch the prompt by name.
-    let compiledTextPrompt: string | undefined;
-    let compiledChatPrompt: ChatPromptClient["prompt"] | undefined; // Langfuse chat prompt type
-
-    try {
-      // try chat prompt type first
-      const prompt = await langfuse.getPrompt(promptName, undefined, {
-        type: "chat",
-      });
-      if (prompt.type !== "chat") {
-        throw new Error(`Prompt '${promptName}' is not a chat prompt`);
-      }
-      compiledChatPrompt = prompt.compile(args);
-    } catch (error) {
-      // fallback to text prompt type
-      const prompt = await langfuse.getPrompt(promptName, undefined, {
-        type: "text",
-      });
-      compiledTextPrompt = prompt.compile(args);
-    }
-
-    if (compiledChatPrompt) {
-      const result: GetPromptResult = {
-        messages: compiledChatPrompt.map((msg) => ({
-          role: ["ai", "assistant"].includes(msg.role) ? "assistant" : "user",
-          content: {
-            type: "text",
-            text: msg.content,
-          },
-        })),
-      };
-      return result;
-    } else if (compiledTextPrompt) {
-      const result: GetPromptResult = {
-        messages: [
-          {
-            role: "user",
-            content: { type: "text", text: compiledTextPrompt },
-          },
-        ],
-      };
-      return result;
-    } else {
-      throw new Error(`Failed to get prompt for '${promptName}'`);
-    }
-  } catch (error: any) {
+  if (!publicKey || !secretKey) {
     throw new Error(
-      `Failed to get prompt for '${promptName}': ${error.message}`
+      'Missing required environment variables: LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY'
     );
   }
+
+  return {
+    publicKey,
+    secretKey,
+    baseUrl,
+    requestTimeout: parseInt(process.env.LANGFUSE_REQUEST_TIMEOUT || '30000'),
+    maxRetries: parseInt(process.env.LANGFUSE_MAX_RETRIES || '3'),
+  };
 }
-
-// Register handlers
-server.server.setRequestHandler(ListPromptsRequestSchema, listPromptsHandler);
-server.server.setRequestHandler(GetPromptRequestSchema, getPromptHandler);
-
-// Tools for compatibility
-server.tool(
-  "get-prompts",
-  "Get prompts that are stored in Langfuse",
-  {
-    cursor: z
-      .string()
-      .optional()
-      .describe("Cursor to paginate through prompts"),
-  },
-  async (args) => {
-    try {
-      const res = await listPromptsHandler({
-        method: "prompts/list",
-        params: {
-          cursor: args.cursor,
-        },
-      });
-
-      const parsedRes: CallToolResult = {
-        content: res.prompts.map((p) => ({
-          type: "text",
-          text: JSON.stringify(p),
-        })),
-      };
-
-      return parsedRes;
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: "Error: " + error }],
-        isError: true,
-      };
-    }
-  }
-);
-
-server.tool(
-  "get-prompt",
-  "Get a prompt that is stored in Langfuse",
-  {
-    name: z
-      .string()
-      .describe(
-        "Name of the prompt to retrieve, use get-prompts to get a list of prompts"
-      ),
-    arguments: z
-      .record(z.string())
-      .optional()
-      .describe(
-        'Arguments with prompt variables to pass to the prompt template, json object, e.g. {"<name>":"<value>"}'
-      ),
-  },
-  async (args, extra) => {
-    try {
-      const res = await getPromptHandler({
-        method: "prompts/get",
-        params: {
-          name: args.name,
-          arguments: args.arguments,
-        },
-      });
-
-      const parsedRes: CallToolResult = {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(res),
-          },
-        ],
-      };
-
-      return parsedRes;
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: "Error: " + error }],
-        isError: true,
-      };
-    }
-  }
-);
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Langfuse Prompts MCP Server running on stdio");
+  try {
+    // Initialize configuration
+    const config = getConfig();
+    
+    // Create Langfuse API client
+    const langfuseClient = new LangfuseAPIClient(config);
+
+    // Create MCP server with both prompts and tools capabilities
+    const server = new McpServer(
+      {
+        name: 'langfuse-prompt-management',
+        version: '2.0.0',
+      },
+      {
+        capabilities: {
+          prompts: {}, // For compatibility with MCP prompts spec
+          tools: {},   // For CRUD operations
+        },
+      }
+    );
+
+    // Create tool handlers
+    const listPromptsHandler = await createListPromptsHandler(langfuseClient);
+    const getPromptHandler = await createGetPromptHandler(langfuseClient);
+    const createPromptHandler = await createCreatePromptHandler(langfuseClient);
+    const updatePromptLabelsHandler = await createUpdatePromptLabelsHandler(langfuseClient);
+    const deletePromptHandler = await createDeletePromptHandler(langfuseClient);
+    const batchUpdateLabelsHandler = await createBatchUpdateLabelsHandler(langfuseClient);
+    const exportPromptsHandler = await createExportPromptsHandler(langfuseClient);
+    const importPromptsHandler = await createImportPromptsHandler(langfuseClient);
+
+    // Register prompts capability handlers for backward compatibility
+    server.server.setRequestHandler(
+      ListPromptsRequestSchema,
+      async (request: ListPromptsRequest): Promise<ListPromptsResult> => {
+        const result = await listPromptsHandler({
+          page: request.params?.cursor ? parseInt(request.params.cursor) : undefined,
+        });
+        
+        // Parse the result and convert to prompts format
+        const data = JSON.parse(result.content[0].text as string);
+        return {
+          prompts: data.prompts.map((p: any) => ({
+            name: p.name,
+            arguments: p.variables?.map((v: string) => ({
+              name: v,
+              required: false,
+            })) || [],
+          })),
+          nextCursor: data.pagination?.hasNextPage ? 
+            (data.pagination.page + 1).toString() : undefined,
+        };
+      }
+    );
+
+    server.server.setRequestHandler(
+      GetPromptRequestSchema,
+      async (request: GetPromptRequest): Promise<GetPromptResult> => {
+        const result = await getPromptHandler({
+          name: request.params.name,
+          arguments: request.params.arguments,
+        });
+        
+        // Parse the result and convert to prompt messages format
+        const data = JSON.parse(result.content[0].text as string);
+        
+        if (data.type === 'chat' && Array.isArray(data.prompt)) {
+          return {
+            messages: data.prompt.map((msg: any) => ({
+              role: msg.role === 'system' ? 'user' : msg.role,
+              content: {
+                type: 'text',
+                text: msg.content,
+              },
+            })),
+          };
+        } else {
+          return {
+            messages: [{
+              role: 'user',
+              content: {
+                type: 'text',
+                text: data.prompt,
+              },
+            }],
+          };
+        }
+      }
+    );
+
+    // Register all CRUD tools
+    server.tool(
+      'list-prompts',
+      'List all prompts with filtering, pagination, and search',
+      listPromptsSchema.shape,
+      listPromptsHandler
+    );
+
+    server.tool(
+      'get-prompt',
+      'Get a specific prompt by name with optional version/label',
+      getPromptSchema.shape,
+      getPromptHandler
+    );
+
+    server.tool(
+      'create-prompt',
+      'Create a new prompt or add a new version to existing prompt',
+      createPromptSchema.shape,
+      createPromptHandler
+    );
+
+    server.tool(
+      'update-prompt-labels',
+      'Update labels for a specific prompt version',
+      updatePromptLabelsSchema.shape,
+      updatePromptLabelsHandler
+    );
+
+    server.tool(
+      'delete-prompt',
+      'Delete a prompt or specific version (not yet available in API)',
+      deletePromptSchema.shape,
+      deletePromptHandler
+    );
+
+    server.tool(
+      'batch-update-labels',
+      'Update labels for multiple prompt versions in a single operation',
+      batchUpdateLabelsSchema.shape,
+      batchUpdateLabelsHandler
+    );
+
+    server.tool(
+      'export-prompts',
+      'Export prompts to JSON or JSONL format for backup/migration',
+      exportPromptsSchema.shape,
+      exportPromptsHandler
+    );
+
+    server.tool(
+      'import-prompts',
+      'Import prompts from JSON or JSONL format',
+      importPromptsSchema.shape,
+      importPromptsHandler
+    );
+
+    // Start the server
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    
+    console.error('Langfuse Prompt Management MCP Server v2.0.0 running on stdio');
+    console.error('Connected to:', config.baseUrl);
+  } catch (error: any) {
+    console.error('Fatal error starting server:', error.message);
+    process.exit(1);
+  }
 }
 
+// Run the server
 main().catch((error) => {
-  console.error("Fatal error in main():", error);
+  console.error('Unhandled error:', error);
   process.exit(1);
 });
